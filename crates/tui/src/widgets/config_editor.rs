@@ -14,17 +14,28 @@ use ratatui::{
 use crate::config::UserConfig;
 use crate::theme::Theme;
 
+/// What kind of field this is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldKind {
+    ApiKey,
+    BaseUrl,
+    Models,
+    /// Separator label (not editable).
+    Label,
+}
+
 /// A single editable field in the config editor.
 #[derive(Debug, Clone)]
 pub struct ConfigField {
     pub provider: String,
-    pub env_var: String,
+    pub label: String,
     pub value: String,
+    pub kind: FieldKind,
     pub editing: bool,
 }
 
 impl ConfigField {
-    /// Display value: masked unless currently editing.
+    /// Display value: masked for API keys unless editing.
     #[must_use]
     pub fn display_value(&self) -> String {
         if self.editing {
@@ -33,14 +44,15 @@ impl ConfigField {
         if self.value.is_empty() {
             return "(not set)".to_string();
         }
-        // Show first 6 + last 4 chars, mask middle
-        if self.value.len() > 12 {
+        if self.kind == FieldKind::ApiKey && self.value.len() > 12 {
             let prefix = &self.value[..6];
             let suffix = &self.value[self.value.len() - 4..];
-            format!("{prefix}...{suffix}")
-        } else {
-            "****".to_string()
+            return format!("{prefix}...{suffix}");
         }
+        if self.kind == FieldKind::ApiKey {
+            return "****".to_string();
+        }
+        self.value.clone()
     }
 }
 
@@ -56,19 +68,75 @@ impl ConfigEditorState {
     /// Create from current user config.
     #[must_use]
     pub fn from_config(config: &UserConfig) -> Self {
-        let fields = UserConfig::known_providers()
-            .into_iter()
-            .filter(|(name, _)| *name != "ollama") // no key needed
-            .map(|(name, env_var)| ConfigField {
+        let mut fields: Vec<ConfigField> = Vec::new();
+
+        // Built-in providers
+        fields.push(ConfigField {
+            provider: String::new(),
+            label: "── Built-in Providers ──".to_string(),
+            value: String::new(),
+            kind: FieldKind::Label,
+            editing: false,
+        });
+        for (name, env_var) in UserConfig::known_providers() {
+            if name == "ollama" {
+                continue;
+            }
+            fields.push(ConfigField {
                 provider: name.to_string(),
-                env_var: env_var.to_string(),
+                label: format!("{name} ({env_var})"),
                 value: config.get_key(name).unwrap_or("").to_string(),
+                kind: FieldKind::ApiKey,
                 editing: false,
-            })
-            .collect();
+            });
+        }
+
+        // Custom providers
+        if !config.custom_providers.is_empty() {
+            fields.push(ConfigField {
+                provider: String::new(),
+                label: "── Custom Providers ──".to_string(),
+                value: String::new(),
+                kind: FieldKind::Label,
+                editing: false,
+            });
+            for cp in &config.custom_providers {
+                fields.push(ConfigField {
+                    provider: cp.name.clone(),
+                    label: format!("{} base_url", cp.name),
+                    value: cp.base_url.clone(),
+                    kind: FieldKind::BaseUrl,
+                    editing: false,
+                });
+                fields.push(ConfigField {
+                    provider: cp.name.clone(),
+                    label: format!("{} api_key", cp.name),
+                    value: cp.api_key.clone(),
+                    kind: FieldKind::ApiKey,
+                    editing: false,
+                });
+                fields.push(ConfigField {
+                    provider: cp.name.clone(),
+                    label: format!("{} models", cp.name),
+                    value: cp.models.join(", "),
+                    kind: FieldKind::Models,
+                    editing: false,
+                });
+            }
+        }
+
+        // "Add custom" pseudo-field
+        fields.push(ConfigField {
+            provider: String::new(),
+            label: "[+ Add custom provider]".to_string(),
+            value: String::new(),
+            kind: FieldKind::Label,
+            editing: false,
+        });
+
         Self {
             fields,
-            selected: 0,
+            selected: 1, // skip first label
             visible: true,
             dirty: false,
         }
@@ -76,19 +144,30 @@ impl ConfigEditorState {
 
     pub fn move_up(&mut self) {
         self.stop_editing();
-        if !self.fields.is_empty() {
-            self.selected = self
-                .selected
-                .checked_sub(1)
-                .unwrap_or(self.fields.len() - 1);
+        if self.fields.is_empty() {
+            return;
         }
+        // Skip label fields
+        let mut idx = self
+            .selected
+            .checked_sub(1)
+            .unwrap_or(self.fields.len() - 1);
+        while idx != self.selected && self.fields[idx].kind == FieldKind::Label {
+            idx = idx.checked_sub(1).unwrap_or(self.fields.len() - 1);
+        }
+        self.selected = idx;
     }
 
     pub fn move_down(&mut self) {
         self.stop_editing();
-        if !self.fields.is_empty() {
-            self.selected = (self.selected + 1) % self.fields.len();
+        if self.fields.is_empty() {
+            return;
         }
+        let mut idx = (self.selected + 1) % self.fields.len();
+        while idx != self.selected && self.fields[idx].kind == FieldKind::Label {
+            idx = (idx + 1) % self.fields.len();
+        }
+        self.selected = idx;
     }
 
     pub fn start_editing(&mut self) {
@@ -127,9 +206,67 @@ impl ConfigEditorState {
 
     /// Apply edited values back to a `UserConfig`.
     pub fn apply_to(&self, config: &mut UserConfig) {
+        use crate::config::CustomProvider;
+        use std::collections::BTreeMap;
+
+        // Collect custom providers by name
+        let mut custom_map: BTreeMap<String, CustomProvider> = BTreeMap::new();
+
         for field in &self.fields {
-            config.set_key(&field.provider, field.value.clone());
+            if field.kind == FieldKind::Label || field.provider.is_empty() {
+                continue;
+            }
+            match field.kind {
+                FieldKind::ApiKey if !custom_map.contains_key(&field.provider) => {
+                    // Built-in provider key
+                    config.set_key(&field.provider, field.value.clone());
+                }
+                FieldKind::BaseUrl => {
+                    custom_map
+                        .entry(field.provider.clone())
+                        .or_insert_with(|| CustomProvider {
+                            name: field.provider.clone(),
+                            base_url: String::new(),
+                            api_key: String::new(),
+                            models: Vec::new(),
+                        })
+                        .base_url
+                        .clone_from(&field.value);
+                }
+                FieldKind::ApiKey => {
+                    custom_map
+                        .entry(field.provider.clone())
+                        .or_insert_with(|| CustomProvider {
+                            name: field.provider.clone(),
+                            base_url: String::new(),
+                            api_key: String::new(),
+                            models: Vec::new(),
+                        })
+                        .api_key
+                        .clone_from(&field.value);
+                }
+                FieldKind::Models => {
+                    let models: Vec<String> = field
+                        .value
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    custom_map
+                        .entry(field.provider.clone())
+                        .or_insert_with(|| CustomProvider {
+                            name: field.provider.clone(),
+                            base_url: String::new(),
+                            api_key: String::new(),
+                            models: Vec::new(),
+                        })
+                        .models = models;
+                }
+                FieldKind::Label => {}
+            }
         }
+
+        config.custom_providers = custom_map.into_values().collect();
     }
 
     pub fn close(&mut self) {
@@ -167,13 +304,23 @@ impl Widget for ConfigEditor<'_> {
 
         let mut lines: Vec<Line<'_>> = Vec::new();
         lines.push(Line::from(Span::styled(
-            " Set API keys for each provider. Enter=edit, Esc=save & close",
+            " Enter=edit, Esc=save & close, /config add <name>=add custom",
             Style::new().fg(self.theme.dim),
         )));
         lines.push(Line::from(""));
 
         for (i, field) in self.fields.iter().enumerate() {
             let is_sel = i == self.selected;
+
+            // Labels are non-editable separators
+            if field.kind == FieldKind::Label {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", field.label),
+                    Style::new().fg(self.theme.accent),
+                )));
+                continue;
+            }
+
             let prefix = if is_sel { "▸ " } else { "  " };
             let label_color = if is_sel { self.theme.accent } else { self.theme.fg };
             let val_display = field.display_value();
@@ -188,15 +335,11 @@ impl Widget for ConfigEditor<'_> {
             lines.push(Line::from(vec![
                 Span::styled(prefix, Style::new().fg(self.theme.accent)),
                 Span::styled(
-                    format!("{:<12}", field.provider),
+                    format!("{:<20}", field.label),
                     Style::new().fg(label_color),
                 ),
                 Span::styled(val_display, Style::new().fg(val_color)),
             ]));
-            lines.push(Line::from(Span::styled(
-                format!("    env: {}", field.env_var),
-                Style::new().fg(self.theme.dim),
-            )));
         }
 
         Paragraph::new(lines).render(inner, buf);

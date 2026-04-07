@@ -6,6 +6,15 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// A custom OpenAI-compatible provider endpoint.
+#[derive(Debug, Clone)]
+pub struct CustomProvider {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub models: Vec<String>,
+}
+
 /// User configuration loaded from `~/.open-clawx-code/config.toml`
 #[derive(Debug, Clone, Default)]
 pub struct UserConfig {
@@ -13,6 +22,8 @@ pub struct UserConfig {
     pub api_keys: BTreeMap<String, String>,
     /// Default model ID.
     pub default_model: Option<String>,
+    /// Custom OpenAI-compatible providers.
+    pub custom_providers: Vec<CustomProvider>,
 }
 
 impl UserConfig {
@@ -83,27 +94,80 @@ impl UserConfig {
         ]
     }
 
+    /// Add a custom provider.
+    pub fn add_custom_provider(&mut self, provider: CustomProvider) {
+        // Remove existing with same name
+        self.custom_providers.retain(|p| p.name != provider.name);
+        self.custom_providers.push(provider);
+    }
+
+    /// Remove a custom provider by name.
+    pub fn remove_custom_provider(&mut self, name: &str) {
+        self.custom_providers.retain(|p| p.name != name);
+    }
+
     fn parse(content: &str) -> Self {
         let mut config = Self::default();
-        let mut section = "";
+        let mut section = String::new();
+        let mut current_custom: Option<CustomProvider> = None;
+
         for line in content.lines() {
             let line = line.trim();
             if line.starts_with('[') && line.ends_with(']') {
-                section = line.trim_start_matches('[').trim_end_matches(']');
+                // Flush previous custom provider
+                if let Some(cp) = current_custom.take() {
+                    if !cp.name.is_empty() {
+                        config.custom_providers.push(cp);
+                    }
+                }
+                section = line
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string();
+                // Detect custom provider sections: [provider.myname]
+                if let Some(name) = section.strip_prefix("provider.") {
+                    current_custom = Some(CustomProvider {
+                        name: name.to_string(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        models: Vec::new(),
+                    });
+                }
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim().trim_matches('"');
                 let v = v.trim().trim_matches('"');
-                match section {
-                    "api_keys" => {
-                        config.api_keys.insert(k.to_string(), v.to_string());
+                if let Some(cp) = &mut current_custom {
+                    match k {
+                        "base_url" => cp.base_url = v.to_string(),
+                        "api_key" => cp.api_key = v.to_string(),
+                        "models" => {
+                            cp.models = v
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                        _ => {}
                     }
-                    "general" if k == "default_model" => {
-                        config.default_model = Some(v.to_string());
+                } else {
+                    match section.as_str() {
+                        "api_keys" => {
+                            config.api_keys.insert(k.to_string(), v.to_string());
+                        }
+                        "general" if k == "default_model" => {
+                            config.default_model = Some(v.to_string());
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+            }
+        }
+        // Flush last custom provider
+        if let Some(cp) = current_custom {
+            if !cp.name.is_empty() {
+                config.custom_providers.push(cp);
             }
         }
         config
@@ -120,6 +184,12 @@ impl UserConfig {
         out.push_str("[api_keys]\n");
         for (provider, key) in &self.api_keys {
             let _ = writeln!(out, "{provider} = \"{key}\"");
+        }
+        for cp in &self.custom_providers {
+            let _ = writeln!(out, "\n[provider.{}]", cp.name);
+            let _ = writeln!(out, "base_url = \"{}\"", cp.base_url);
+            let _ = writeln!(out, "api_key = \"{}\"", cp.api_key);
+            let _ = writeln!(out, "models = \"{}\"", cp.models.join(", "));
         }
         out
     }
@@ -181,5 +251,42 @@ openai = "sk-test456"
         assert_eq!(provider_to_env_var("anthropic"), "ANTHROPIC_API_KEY");
         assert_eq!(provider_to_env_var("openai"), "OPENAI_API_KEY");
         assert_eq!(provider_to_env_var("custom"), "CUSTOM_API_KEY");
+    }
+
+    #[test]
+    fn custom_provider_roundtrip() {
+        let toml = r#"
+[general]
+default_model = "my-model"
+
+[api_keys]
+anthropic = "sk-test"
+
+[provider.deepseek]
+base_url = "https://api.deepseek.com/v1"
+api_key = "sk-deep-123"
+models = "deepseek-chat, deepseek-coder"
+
+[provider.local-llama]
+base_url = "http://localhost:11434/v1"
+api_key = ""
+models = "llama3"
+"#;
+        let config = UserConfig::parse(toml);
+        assert_eq!(config.custom_providers.len(), 2);
+        assert_eq!(config.custom_providers[0].name, "deepseek");
+        assert_eq!(
+            config.custom_providers[0].base_url,
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(config.custom_providers[0].models.len(), 2);
+        assert_eq!(config.custom_providers[1].name, "local-llama");
+
+        // Roundtrip
+        let serialized = config.serialize();
+        let reparsed = UserConfig::parse(&serialized);
+        assert_eq!(reparsed.custom_providers.len(), 2);
+        assert_eq!(reparsed.custom_providers[0].name, "deepseek");
+        assert_eq!(reparsed.custom_providers[0].models, vec!["deepseek-chat", "deepseek-coder"]);
     }
 }

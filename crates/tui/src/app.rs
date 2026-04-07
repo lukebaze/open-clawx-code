@@ -683,8 +683,33 @@ impl App {
                 }
             }
             "/config" => {
-                self.config_editor =
-                    Some(ConfigEditorState::from_config(&self.user_config));
+                let sub = parts.get(1).copied();
+                match sub {
+                    Some("add") => {
+                        if let Some(&name) = parts.get(2) {
+                            use crate::config::CustomProvider;
+                            self.user_config.add_custom_provider(CustomProvider {
+                                name: name.to_string(),
+                                base_url: String::new(),
+                                api_key: String::new(),
+                                models: Vec::new(),
+                            });
+                            self.conversation.push_error(format!(
+                                "Custom provider '{name}' added. Opening config editor…"
+                            ));
+                        } else {
+                            self.conversation
+                                .push_error("Usage: /config add <name>".to_string());
+                            return;
+                        }
+                        self.config_editor =
+                            Some(ConfigEditorState::from_config(&self.user_config));
+                    }
+                    _ => {
+                        self.config_editor =
+                            Some(ConfigEditorState::from_config(&self.user_config));
+                    }
+                }
             }
             "/model" => {
                 if let Some(&model_id) = parts.get(1) {
