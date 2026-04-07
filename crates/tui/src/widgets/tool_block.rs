@@ -34,16 +34,14 @@ impl Widget for ToolBlockWidget<'_> {
         }
 
         let indicator = if self.is_expanded { "▼" } else { "▶" };
-        let summary = self
-            .result
-            .map_or("(no output)", |r| {
-                let first_line = r.lines().next().unwrap_or("");
-                if first_line.len() > 80 {
-                    &first_line[..80]
-                } else {
-                    first_line
-                }
-            });
+        let summary = self.result.map_or("(no output)", |r| {
+            let first_line = r.lines().next().unwrap_or("");
+            if first_line.len() > 80 {
+                &first_line[..80]
+            } else {
+                first_line
+            }
+        });
 
         if self.is_expanded {
             // Expanded: bordered block with content

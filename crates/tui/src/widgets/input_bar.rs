@@ -62,9 +62,7 @@ impl Widget for InputBar<'_> {
             if cursor_x < area.x + area.width - 1 {
                 buf.set_style(
                     Rect::new(cursor_x, cursor_y, 1, 1),
-                    Style::new()
-                        .bg(self.theme.fg)
-                        .fg(self.theme.bg),
+                    Style::new().bg(self.theme.fg).fg(self.theme.bg),
                 );
             }
         }

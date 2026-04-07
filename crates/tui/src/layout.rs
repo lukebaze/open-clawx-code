@@ -15,7 +15,7 @@ impl AppLayout {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // status bar
+                Constraint::Length(1), // status bar
                 Constraint::Fill(1),   // main area
                 Constraint::Length(3), // input bar
             ])

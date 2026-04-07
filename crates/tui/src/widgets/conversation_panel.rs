@@ -17,11 +17,7 @@ pub struct ConversationPanel<'a> {
 }
 
 impl<'a> ConversationPanel<'a> {
-    pub const fn new(
-        conversation: &'a ConversationView,
-        theme: &'a Theme,
-        focused: bool,
-    ) -> Self {
+    pub const fn new(conversation: &'a ConversationView, theme: &'a Theme, focused: bool) -> Self {
         Self {
             conversation,
             theme,
@@ -35,10 +31,7 @@ impl<'a> ConversationPanel<'a> {
         for msg in self.conversation.messages() {
             // Role label
             let (label, label_style) = match msg.role {
-                Role::User => (
-                    "You",
-                    Style::new().fg(self.theme.accent),
-                ),
+                Role::User => ("You", Style::new().fg(self.theme.accent)),
                 Role::Assistant => (
                     "Assistant",
                     Style::new().fg(ratatui::style::Color::Rgb(100, 220, 140)),
@@ -53,9 +46,10 @@ impl<'a> ConversationPanel<'a> {
                 ),
             };
 
-            lines.push(Line::from(vec![
-                Span::styled(format!("{label}: "), label_style),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("{label}: "),
+                label_style,
+            )]));
 
             // Message content — split into lines
             let content_style = if msg.is_error {
@@ -65,16 +59,16 @@ impl<'a> ConversationPanel<'a> {
             };
 
             for line in msg.content.lines() {
-                lines.push(Line::from(Span::styled(
-                    line.to_string(),
-                    content_style,
-                )));
+                lines.push(Line::from(Span::styled(line.to_string(), content_style)));
             }
 
             // Usage metadata
             if let Some(ref meta) = msg.meta {
                 lines.push(Line::from(Span::styled(
-                    format!("  [tokens: {}in / {}out]", meta.input_tokens, meta.output_tokens),
+                    format!(
+                        "  [tokens: {}in / {}out]",
+                        meta.input_tokens, meta.output_tokens
+                    ),
                     Style::new().fg(self.theme.dim),
                 )));
             }

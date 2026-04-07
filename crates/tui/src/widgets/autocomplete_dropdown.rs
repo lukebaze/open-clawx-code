@@ -23,7 +23,10 @@ impl Widget for AutocompleteDropdown<'_> {
         }
 
         // Position: overlay above the input bar area
-        let height = (u16::try_from(items.len()).unwrap_or(u16::MAX).saturating_add(2)).min(area.height);
+        let height = (u16::try_from(items.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(2))
+        .min(area.height);
         let width = area.width.min(50);
         let x = area.x + 1;
         let y = area.y.saturating_sub(height);

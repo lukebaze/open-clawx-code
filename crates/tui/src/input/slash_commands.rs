@@ -7,15 +7,42 @@ pub struct SlashCommand {
 /// All available slash commands
 pub fn all_commands() -> Vec<SlashCommand> {
     vec![
-        SlashCommand { name: "/model", description: "Switch AI model" },
-        SlashCommand { name: "/clear", description: "Clear conversation" },
-        SlashCommand { name: "/compact", description: "Compact conversation context" },
-        SlashCommand { name: "/session list", description: "List saved sessions" },
-        SlashCommand { name: "/session load", description: "Load a saved session" },
-        SlashCommand { name: "/session save", description: "Save current session" },
-        SlashCommand { name: "/config", description: "Show configuration" },
-        SlashCommand { name: "/help", description: "Show keybinding help" },
-        SlashCommand { name: "/quit", description: "Quit OCX" },
+        SlashCommand {
+            name: "/model",
+            description: "Switch AI model",
+        },
+        SlashCommand {
+            name: "/clear",
+            description: "Clear conversation",
+        },
+        SlashCommand {
+            name: "/compact",
+            description: "Compact conversation context",
+        },
+        SlashCommand {
+            name: "/session list",
+            description: "List saved sessions",
+        },
+        SlashCommand {
+            name: "/session load",
+            description: "Load a saved session",
+        },
+        SlashCommand {
+            name: "/session save",
+            description: "Save current session",
+        },
+        SlashCommand {
+            name: "/config",
+            description: "Show configuration",
+        },
+        SlashCommand {
+            name: "/help",
+            description: "Show keybinding help",
+        },
+        SlashCommand {
+            name: "/quit",
+            description: "Quit OCX",
+        },
     ]
 }
 
