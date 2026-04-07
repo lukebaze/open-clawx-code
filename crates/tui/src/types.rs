@@ -1,6 +1,7 @@
 use ocx_gitnexus::ImpactResult;
-use ocx_orchestrator::{FailureContext, TddPhase, TestResult, TestType};
+use ocx_orchestrator::{AgentStatus, FailureContext, TddPhase, TestResult, TestType};
 
+#[allow(dead_code)] // New variants connected when LSP/agent team are live
 /// Commands sent from TUI to the runtime bridge
 pub enum Command {
     /// User submitted a message
@@ -18,6 +19,7 @@ pub enum Command {
     Quit,
 }
 
+#[allow(dead_code)] // New variants connected when LSP/agent team are live
 /// Events sent from the runtime bridge back to the TUI
 pub enum Event {
     /// Incremental text token from assistant
@@ -84,8 +86,36 @@ pub enum Event {
         respond: std::sync::mpsc::Sender<bool>,
     },
 
+    // --- Agent Team events ---
+    /// Agent status changed in team.
+    AgentStatusChanged {
+        agent_id: String,
+        agent_name: String,
+        status: AgentStatus,
+        current_task: Option<String>,
+        messages_sent: usize,
+    },
+    /// All agents completed their tasks.
+    AgentTeamDone { summary: String },
+
+    // --- LSP events ---
+    /// LSP diagnostics updated for a file.
+    LspDiagnosticsUpdated {
+        file: String,
+        diagnostics: Vec<LspDiagnosticEntry>,
+    },
+
     /// Error during runtime operation
     Error(String),
+}
+
+/// LSP diagnostic entry for TUI event transport.
+#[derive(Debug, Clone)]
+pub struct LspDiagnosticEntry {
+    pub file: String,
+    pub line: u32,
+    pub severity: String,
+    pub message: String,
 }
 
 /// Metadata about a completed assistant message

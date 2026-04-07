@@ -1,7 +1,9 @@
+pub mod agent_team_panel;
 pub mod approval_dialog;
 pub mod autocomplete_dropdown;
 pub mod context_panel;
 pub mod conversation_panel;
+pub mod diagnostics_tab;
 pub mod files_tab;
 pub mod git_tab;
 pub mod gitnexus_tab;

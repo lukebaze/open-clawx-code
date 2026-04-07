@@ -3,13 +3,19 @@
 //! Provides impact analysis, context lookup, and semantic code queries.
 //! Gracefully degrades when `GitNexus` is not installed.
 
+pub mod auto_reader;
 pub mod cli_runner;
+pub mod native_reader;
+pub mod reader_trait;
 pub mod types;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use auto_reader::AutoGitNexusReader;
 pub use cli_runner::{is_gitnexus_available, GitNexusCliError};
+pub use native_reader::NativeGitNexusReader;
+pub use reader_trait::GitNexusReader;
 pub use types::{CallerInfo, ContextResult, ImpactResult, QueryMatch, QueryResult, RiskLevel};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -115,6 +121,24 @@ impl GitNexusClient {
             matches: vec![],
             raw_output: output,
         })
+    }
+}
+
+impl GitNexusReader for GitNexusClient {
+    fn is_available(&self) -> bool {
+        self.is_available()
+    }
+
+    fn impact(&self, symbol: &str) -> Result<ImpactResult, GitNexusCliError> {
+        self.impact(symbol)
+    }
+
+    fn context(&self, symbol: &str) -> Result<ContextResult, GitNexusCliError> {
+        self.context(symbol)
+    }
+
+    fn query(&self, query: &str) -> Result<QueryResult, GitNexusCliError> {
+        self.query(query)
     }
 }
 

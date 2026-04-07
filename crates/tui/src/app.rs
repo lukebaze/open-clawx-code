@@ -20,10 +20,12 @@ use crate::session_manager::SessionManager;
 use crate::theme::Theme;
 use crate::types::{Command, Event};
 use crate::widgets::{
+    agent_team_panel::AgentTeamPanel,
     approval_dialog::ApprovalDialog,
     autocomplete_dropdown::AutocompleteDropdown,
     context_panel::{ContextPanelWidget, ContextTab},
     conversation_panel::ConversationPanel,
+    diagnostics_tab::DiagnosticsTab,
     files_tab::FilesTab,
     git_tab::GitTab,
     gitnexus_tab::GitNexusTab,
@@ -58,6 +60,8 @@ struct App {
     git_tab: GitTab,
     right_panel_pct: u16,
     gitnexus_tab: GitNexusTab,
+    diagnostics_tab: DiagnosticsTab,
+    agent_team_panel: AgentTeamPanel,
     // Phase 05: session & mode state
     mode_state: ModeState,
     model_name: String,
@@ -92,6 +96,8 @@ impl App {
             files_tab: FilesTab::new(),
             git_tab,
             gitnexus_tab: GitNexusTab::new(false), // availability checked later
+            diagnostics_tab: DiagnosticsTab::new(),
+            agent_team_panel: AgentTeamPanel::new(),
             right_panel_pct: 30,
             mode_state: ModeState::new(),
             model_name,
@@ -146,6 +152,8 @@ impl App {
                 active_tab: self.active_tab,
                 files_tab: &self.files_tab,
                 git_tab: &self.git_tab,
+                diagnostics_tab: &self.diagnostics_tab,
+                agent_team_panel: &self.agent_team_panel,
                 theme: &self.theme,
                 focused: self.mode == InputMode::Normal && self.focus == Focus::ContextPanel,
             },
@@ -345,6 +353,12 @@ impl App {
             }
             KeyCode::Char('3') if self.focus == Focus::ContextPanel => {
                 self.active_tab = ContextTab::GitNexus;
+            }
+            KeyCode::Char('4') if self.focus == Focus::ContextPanel => {
+                self.active_tab = ContextTab::Diagnostics;
+            }
+            KeyCode::Char('5') if self.focus == Focus::ContextPanel => {
+                self.active_tab = ContextTab::Agents;
             }
             // Any printable char → switch to insert mode
             KeyCode::Char(ch) if !ch.is_control() => {
@@ -686,6 +700,54 @@ impl App {
                     self.gitnexus_tab.push_impact(impact.clone());
                     self.mode_state.pending_impact =
                         Some(PendingImpactApproval { impact, respond });
+                }
+
+                // Agent team events
+                Event::AgentStatusChanged {
+                    agent_id,
+                    agent_name,
+                    status,
+                    current_task,
+                    messages_sent,
+                } => {
+                    use crate::widgets::agent_team_panel::AgentView;
+                    let view = AgentView {
+                        id: agent_id.clone(),
+                        name: agent_name,
+                        status_label: status.label().to_string(),
+                        current_task,
+                        messages_sent,
+                    };
+                    // Update or add agent in panel
+                    if let Some(existing) = self
+                        .agent_team_panel
+                        .agents
+                        .iter_mut()
+                        .find(|a| a.id == agent_id)
+                    {
+                        *existing = view;
+                    } else {
+                        self.agent_team_panel.agents.push(view);
+                    }
+                }
+                Event::AgentTeamDone { summary } => {
+                    self.conversation
+                        .push_error(format!("Agent team done: {summary}"));
+                }
+
+                // LSP events
+                Event::LspDiagnosticsUpdated { diagnostics, .. } => {
+                    use crate::widgets::diagnostics_tab::DiagnosticEntry;
+                    let entries: Vec<DiagnosticEntry> = diagnostics
+                        .into_iter()
+                        .map(|d| DiagnosticEntry {
+                            file: d.file,
+                            line: d.line,
+                            severity: d.severity,
+                            message: d.message,
+                        })
+                        .collect();
+                    self.diagnostics_tab.set_diagnostics(entries);
                 }
 
                 Event::Error(msg) => {

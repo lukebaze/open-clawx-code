@@ -29,6 +29,7 @@ claw-telemetry = { path = "crates/claw-telemetry" }
 
 # OCX crates
 ocx-gitnexus = { path = "crates/gitnexus" }
+ocx-lsp = { path = "crates/lsp" }
 ocx-orchestrator = { path = "crates/orchestrator" }
 ocx-providers = { path = "crates/providers" }
 ocx-server = { path = "crates/server" }

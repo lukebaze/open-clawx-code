@@ -13,6 +13,9 @@ pub struct Theme {
     pub input_bg: Color,
     pub input_fg: Color,
     pub dim: Color,
+    pub error: Color,
+    pub warning: Color,
+    pub success: Color,
 }
 
 impl Default for Theme {
@@ -28,6 +31,9 @@ impl Default for Theme {
             input_bg: Color::Rgb(30, 30, 42),
             input_fg: Color::Rgb(220, 220, 230),
             dim: Color::Rgb(100, 100, 120),
+            error: Color::Rgb(255, 100, 100),
+            warning: Color::Rgb(255, 200, 80),
+            success: Color::Rgb(100, 220, 100),
         }
     }
 }

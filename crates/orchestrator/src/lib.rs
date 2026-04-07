@@ -3,11 +3,15 @@
 //! Drives the cycle: Analyze → Red (write tests) → Green (implement) →
 //! Unit verify → E2E verify → Refactor → Done.
 
+pub mod agent_team;
 pub mod test_runner;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+pub use agent_team::{
+    AgentContext, AgentMessage, AgentStatus, AgentTeam, AgentTeamEvent, MessageContent,
+};
 pub use test_runner::{detect_framework, FailedTest, TestFramework, TestResult, TestRunner};
 
 use ocx_gitnexus::{GitNexusClient, ImpactResult};

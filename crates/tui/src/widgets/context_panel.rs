@@ -7,6 +7,8 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::agent_team_panel::AgentTeamPanel;
+use crate::widgets::diagnostics_tab::DiagnosticsTab;
 use crate::widgets::files_tab::FilesTab;
 use crate::widgets::git_tab::GitTab;
 
@@ -16,6 +18,8 @@ pub enum ContextTab {
     Files,
     Git,
     GitNexus,
+    Diagnostics,
+    Agents,
 }
 
 impl ContextTab {
@@ -24,7 +28,9 @@ impl ContextTab {
         match self {
             Self::Files => Self::Git,
             Self::Git => Self::GitNexus,
-            Self::GitNexus => Self::Files,
+            Self::GitNexus => Self::Diagnostics,
+            Self::Diagnostics => Self::Agents,
+            Self::Agents => Self::Files,
         }
     }
 
@@ -33,6 +39,8 @@ impl ContextTab {
             Self::Files => 0,
             Self::Git => 1,
             Self::GitNexus => 2,
+            Self::Diagnostics => 3,
+            Self::Agents => 4,
         }
     }
 }
@@ -42,6 +50,8 @@ pub struct ContextPanelWidget<'a> {
     pub active_tab: ContextTab,
     pub files_tab: &'a FilesTab,
     pub git_tab: &'a GitTab,
+    pub diagnostics_tab: &'a DiagnosticsTab,
+    pub agent_team_panel: &'a AgentTeamPanel,
     pub theme: &'a Theme,
     pub focused: bool,
 }
@@ -77,6 +87,8 @@ impl Widget for ContextPanelWidget<'_> {
             Span::styled(" Files ", Style::new().fg(self.theme.fg)),
             Span::styled(" Git ", Style::new().fg(self.theme.fg)),
             Span::styled(" GitNexus ", Style::new().fg(self.theme.fg)),
+            Span::styled(" Diag ", Style::new().fg(self.theme.fg)),
+            Span::styled(" Agents ", Style::new().fg(self.theme.fg)),
         ];
         let tabs = Tabs::new(tab_titles)
             .select(self.active_tab.index())
@@ -88,6 +100,14 @@ impl Widget for ContextPanelWidget<'_> {
             ContextTab::Files => self.files_tab.render_content(chunks[1], buf, self.theme),
             ContextTab::Git => self.git_tab.render_content(chunks[1], buf, self.theme),
             ContextTab::GitNexus => render_gitnexus_placeholder(chunks[1], buf, self.theme),
+            ContextTab::Diagnostics => {
+                self.diagnostics_tab
+                    .render_content(chunks[1], buf, self.theme);
+            }
+            ContextTab::Agents => {
+                self.agent_team_panel
+                    .render_content(chunks[1], buf, self.theme);
+            }
         }
     }
 }
