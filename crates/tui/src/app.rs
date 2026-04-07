@@ -1,4 +1,5 @@
 use std::io::{self, Stdout};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::{
@@ -7,7 +8,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Frame, Terminal};
-use std::sync::mpsc;
 
 use crate::conversation::ConversationView;
 use crate::layout::AppLayout;
@@ -15,9 +15,11 @@ use crate::runtime_bridge::RuntimeBridge;
 use crate::theme::Theme;
 use crate::types::{Command, Event};
 use crate::widgets::{
+    context_panel::{ContextPanelWidget, ContextTab},
     conversation_panel::ConversationPanel,
+    files_tab::FilesTab,
+    git_tab::GitTab,
     input_bar::{InputBar, InputBuffer},
-    placeholder::PlaceholderPanel,
     status_bar::StatusBar,
 };
 
@@ -37,13 +39,18 @@ struct App {
     conversation: ConversationView,
     cmd_tx: mpsc::Sender<Command>,
     event_rx: mpsc::Receiver<Event>,
+    // Context panel state
+    active_tab: ContextTab,
+    files_tab: FilesTab,
+    git_tab: GitTab,
+    right_panel_pct: u16,
 }
 
 impl App {
-    fn new(
-        cmd_tx: mpsc::Sender<Command>,
-        event_rx: mpsc::Receiver<Event>,
-    ) -> Self {
+    fn new(cmd_tx: mpsc::Sender<Command>, event_rx: mpsc::Receiver<Event>) -> Self {
+        let mut git_tab = GitTab::new();
+        git_tab.refresh();
+
         Self {
             focus: Focus::InputBar,
             should_quit: false,
@@ -52,11 +59,15 @@ impl App {
             conversation: ConversationView::new(),
             cmd_tx,
             event_rx,
+            active_tab: ContextTab::Files,
+            files_tab: FilesTab::new(),
+            git_tab,
+            right_panel_pct: 30,
         }
     }
 
     fn render(&self, frame: &mut Frame) {
-        let layout = AppLayout::new(frame.area());
+        let layout = AppLayout::new(frame.area(), self.right_panel_pct);
 
         frame.render_widget(StatusBar::new(&self.theme), layout.status_bar);
 
@@ -70,7 +81,13 @@ impl App {
         );
 
         frame.render_widget(
-            PlaceholderPanel::new("Context", &self.theme, self.focus == Focus::ContextPanel),
+            ContextPanelWidget {
+                active_tab: self.active_tab,
+                files_tab: &self.files_tab,
+                git_tab: &self.git_tab,
+                theme: &self.theme,
+                focused: self.focus == Focus::ContextPanel,
+            },
             layout.context_panel,
         );
 
@@ -111,12 +128,23 @@ impl App {
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                 self.focus = Focus::ContextPanel;
             }
-            (KeyCode::Tab, _) => {
+            (KeyCode::Tab, _) if self.focus != Focus::InputBar => {
                 self.focus = match self.focus {
                     Focus::Conversation => Focus::ContextPanel,
                     Focus::ContextPanel => Focus::InputBar,
                     Focus::InputBar => Focus::Conversation,
                 };
+            }
+            // Context panel tab cycling (when context focused)
+            (KeyCode::Tab, _) if self.focus == Focus::ContextPanel => {
+                self.active_tab = self.active_tab.next();
+            }
+            // Panel width adjustment
+            (KeyCode::Char('['), KeyModifiers::CONTROL) => {
+                self.right_panel_pct = self.right_panel_pct.saturating_sub(5).max(20);
+            }
+            (KeyCode::Char(']'), KeyModifiers::CONTROL) => {
+                self.right_panel_pct = (self.right_panel_pct + 5).min(50);
             }
             // Conversation scroll (when conversation focused)
             (KeyCode::Char('j'), KeyModifiers::NONE) if self.focus == Focus::Conversation => {
@@ -124,6 +152,16 @@ impl App {
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) if self.focus == Focus::Conversation => {
                 self.conversation.scroll_up(1);
+            }
+            // Context panel tab switch with number keys
+            (KeyCode::Char('1'), KeyModifiers::NONE) if self.focus == Focus::ContextPanel => {
+                self.active_tab = ContextTab::Files;
+            }
+            (KeyCode::Char('2'), KeyModifiers::NONE) if self.focus == Focus::ContextPanel => {
+                self.active_tab = ContextTab::Git;
+            }
+            (KeyCode::Char('3'), KeyModifiers::NONE) if self.focus == Focus::ContextPanel => {
+                self.active_tab = ContextTab::GitNexus;
             }
             // Input bar editing (when focused)
             _ if self.focus == Focus::InputBar => {
@@ -141,6 +179,9 @@ impl App {
                     self.conversation.push_user_message(text.clone());
                     let _ = self.cmd_tx.send(Command::SendMessage(text));
                 }
+            }
+            KeyCode::Tab => {
+                self.focus = Focus::Conversation;
             }
             KeyCode::Char(ch) => self.input.insert(ch),
             KeyCode::Backspace => self.input.backspace(),
@@ -165,11 +206,14 @@ impl App {
                 }
                 Event::ToolStart { name } => {
                     self.conversation
-                        .push_token(&format!("\n[tool: {name}]\n"));
+                        .push_token(&format!("\n[tool: {name}] running...\n"));
                 }
                 Event::ToolEnd { result } => {
                     self.conversation
                         .push_token(&format!("[result: {result}]\n"));
+                    // Refresh git status after tool execution
+                    self.git_tab.mark_dirty();
+                    self.git_tab.refresh();
                 }
                 Event::Error(msg) => {
                     self.conversation.push_error(msg);
@@ -197,7 +241,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
 
 /// Entry point — sets up terminal, spawns runtime bridge, runs event loop
 pub async fn run() -> anyhow::Result<()> {
-    let model = std::env::var("OCX_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+    let model =
+        std::env::var("OCX_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
 
     let (cmd_tx, event_rx) = RuntimeBridge::spawn(model);
 
@@ -206,11 +251,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     loop {
         terminal.draw(|frame| app.render(frame))?;
-
-        // Process any pending runtime events
         app.process_events();
 
-        // Poll for terminal input events
         if event::poll(Duration::from_millis(50))? {
             if let CrosstermEvent::Key(key) = event::read()? {
                 app.handle_key(key.code, key.modifiers);

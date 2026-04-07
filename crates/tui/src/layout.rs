@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Splits the terminal into: status bar (1 row), main area (fill), input bar (3 rows).
-/// Main area is split 70/30 into conversation (left) and context panel (right).
+/// Main area is split into conversation (left) and context panel (right).
 pub struct AppLayout {
     pub status_bar: Rect,
     pub conversation: Rect,
@@ -10,7 +10,8 @@ pub struct AppLayout {
 }
 
 impl AppLayout {
-    pub fn new(area: Rect) -> Self {
+    /// Build layout with configurable right panel percentage (20-50 range).
+    pub fn new(area: Rect, right_panel_pct: u16) -> Self {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -20,11 +21,12 @@ impl AppLayout {
             ])
             .split(area);
 
+        let left_pct = 100 - right_panel_pct;
         let main_cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(70), // conversation
-                Constraint::Percentage(30), // context panel
+                Constraint::Percentage(left_pct),
+                Constraint::Percentage(right_panel_pct),
             ])
             .split(vertical[1]);
 

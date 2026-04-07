@@ -8,12 +8,14 @@ use ratatui::{
 use crate::theme::Theme;
 
 /// Placeholder panel used for conversation and context areas before real content
+#[allow(dead_code)]
 pub struct PlaceholderPanel<'a> {
     title: &'a str,
     theme: &'a Theme,
     focused: bool,
 }
 
+#[allow(dead_code)]
 impl<'a> PlaceholderPanel<'a> {
     pub const fn new(title: &'a str, theme: &'a Theme, focused: bool) -> Self {
         Self {

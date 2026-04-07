@@ -1,4 +1,8 @@
+pub mod context_panel;
 pub mod conversation_panel;
+pub mod files_tab;
+pub mod git_tab;
 pub mod input_bar;
 pub mod placeholder;
 pub mod status_bar;
+pub mod tool_block;
