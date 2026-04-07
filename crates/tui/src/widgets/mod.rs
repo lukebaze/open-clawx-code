@@ -1,7 +1,9 @@
+pub mod autocomplete_dropdown;
 pub mod context_panel;
 pub mod conversation_panel;
 pub mod files_tab;
 pub mod git_tab;
+pub mod help_overlay;
 pub mod input_bar;
 pub mod placeholder;
 pub mod status_bar;

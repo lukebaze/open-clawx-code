@@ -103,6 +103,10 @@ impl ConversationView {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
     }
 
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = usize::MAX / 2; // large enough to scroll past all content
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
     }

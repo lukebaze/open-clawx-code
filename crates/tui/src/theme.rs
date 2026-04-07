@@ -8,6 +8,7 @@ pub struct Theme {
     pub border: Color,
     pub border_focused: Color,
     pub status_bg: Color,
+    #[allow(dead_code)]
     pub status_fg: Color,
     pub input_bg: Color,
     pub input_fg: Color,

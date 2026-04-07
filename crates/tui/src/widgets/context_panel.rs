@@ -19,6 +19,7 @@ pub enum ContextTab {
 }
 
 impl ContextTab {
+    #[allow(dead_code)]
     pub fn next(self) -> Self {
         match self {
             Self::Files => Self::Git,
