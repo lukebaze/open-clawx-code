@@ -1,5 +1,6 @@
 pub mod agent_team_panel;
 pub mod approval_dialog;
+pub mod model_picker;
 pub mod autocomplete_dropdown;
 pub mod context_panel;
 pub mod conversation_panel;

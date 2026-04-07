@@ -104,7 +104,7 @@ impl RuntimeBridge {
         (cmd_tx, event_rx)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     fn run_loop(
         cmd_rx: mpsc::Receiver<Command>,
         event_tx: mpsc::Sender<Event>,
@@ -216,6 +216,11 @@ impl RuntimeBridge {
                     let _ = event_tx.send(Event::Error(
                         "Build mode resume not yet connected to orchestrator".to_string(),
                     ));
+                }
+                Command::SetModel(model_id) => {
+                    let _ = event_tx.send(Event::Error(format!(
+                        "Model set to: {model_id} (provider connection pending)"
+                    )));
                 }
                 Command::Cancel => {}
                 Command::Quit => break,

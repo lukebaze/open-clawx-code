@@ -10,6 +10,8 @@ pub enum Command {
     SaveSession,
     /// Trigger session compaction
     Compact,
+    /// Switch to a different model
+    SetModel(String),
     /// Cancel current operation
     Cancel,
     /// Resume Build mode after pause (wired in Phase 06+)

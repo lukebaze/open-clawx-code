@@ -32,6 +32,7 @@ use crate::widgets::{
     help_overlay::HelpOverlay,
     impact_dialog::ImpactDialog,
     input_bar::{InputBar, InputBuffer},
+    model_picker::{ModelEntry, ModelPicker, ModelPickerState},
     session_picker::{SessionPicker, SessionPickerState},
     status_bar::StatusBar,
 };
@@ -69,6 +70,7 @@ struct App {
     total_cost_usd: f64,
     session_name: String,
     session_picker: Option<SessionPickerState>,
+    model_picker: Option<ModelPickerState>,
 }
 
 impl App {
@@ -81,7 +83,7 @@ impl App {
         let mut git_tab = GitTab::new();
         git_tab.refresh();
 
-        Self {
+        let mut app = Self {
             mode: InputMode::Insert,
             focus: Focus::Conversation,
             should_quit: false,
@@ -105,9 +107,19 @@ impl App {
             total_cost_usd: 0.0,
             session_name,
             session_picker: None,
-        }
+            model_picker: None,
+        };
+
+        // Show splash screen on startup
+        app.conversation.push_token(crate::splash::SPLASH_ART);
+        app.conversation.push_token(crate::splash::WELCOME_MSG);
+        app.conversation
+            .finish_assistant_message(crate::types::MessageMeta::default());
+
+        app
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render(&self, frame: &mut Frame) {
         let layout = AppLayout::new(frame.area(), self.right_panel_pct);
 
@@ -211,6 +223,20 @@ impl App {
             );
         }
 
+        // Model picker overlay
+        if let Some(picker) = &self.model_picker {
+            if picker.visible {
+                frame.render_widget(
+                    ModelPicker {
+                        models: &picker.models,
+                        selected: picker.selected,
+                        theme: &self.theme,
+                    },
+                    frame.area(),
+                );
+            }
+        }
+
         // Impact gate dialog overlay
         if let Some(pending) = &self.mode_state.pending_impact {
             frame.render_widget(
@@ -224,6 +250,14 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Model picker has priority when visible
+        if let Some(picker) = &mut self.model_picker {
+            if picker.visible {
+                self.handle_model_picker_key(code);
+                return;
+            }
+        }
+
         // Session picker has priority when visible
         if let Some(picker) = &mut self.session_picker {
             if picker.visible {
@@ -441,6 +475,30 @@ impl App {
         }
     }
 
+    fn handle_model_picker_key(&mut self, code: KeyCode) {
+        let picker = self.model_picker.as_mut().unwrap();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => picker.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => picker.move_down(),
+            KeyCode::Enter => {
+                if let Some(id) = picker.selected_model_id() {
+                    let id = id.to_string();
+                    self.model_name.clone_from(&id);
+                    self.conversation
+                        .push_error(format!("Model switched to: {id}"));
+                    let _ = self.cmd_tx.send(Command::SetModel(id));
+                }
+                picker.close();
+                self.model_picker = None;
+            }
+            KeyCode::Esc => {
+                picker.close();
+                self.model_picker = None;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_session_picker_key(&mut self, code: KeyCode) {
         let picker = self.session_picker.as_mut().unwrap();
         match code {
@@ -562,8 +620,16 @@ impl App {
                 }
             }
             "/model" => {
-                self.conversation
-                    .push_error(format!("Current model: {}", self.model_name));
+                if let Some(&model_id) = parts.get(1) {
+                    // Direct switch: /model <id>
+                    self.model_name = model_id.to_string();
+                    self.conversation
+                        .push_error(format!("Model switched to: {}", self.model_name));
+                    let _ = self.cmd_tx.send(Command::SetModel(self.model_name.clone()));
+                } else {
+                    // Show model picker
+                    self.show_model_picker();
+                }
             }
             _ => {
                 self.conversation
@@ -589,6 +655,69 @@ impl App {
                     .push_error(format!("Session manager error: {e}"));
             }
         }
+    }
+
+    fn show_model_picker(&mut self) {
+        // Build model list from known providers
+        let models = vec![
+            ModelEntry {
+                id: "claude-sonnet-4-20250514".to_string(),
+                name: "Claude Sonnet 4".to_string(),
+                provider: "anthropic".to_string(),
+                context_window: 200_000,
+                is_active: self.model_name == "claude-sonnet-4-20250514",
+            },
+            ModelEntry {
+                id: "claude-opus-4-20250514".to_string(),
+                name: "Claude Opus 4".to_string(),
+                provider: "anthropic".to_string(),
+                context_window: 200_000,
+                is_active: self.model_name == "claude-opus-4-20250514",
+            },
+            ModelEntry {
+                id: "claude-haiku-4-20250514".to_string(),
+                name: "Claude Haiku 4".to_string(),
+                provider: "anthropic".to_string(),
+                context_window: 200_000,
+                is_active: self.model_name == "claude-haiku-4-20250514",
+            },
+            ModelEntry {
+                id: "gpt-4o".to_string(),
+                name: "GPT-4o".to_string(),
+                provider: "openai".to_string(),
+                context_window: 128_000,
+                is_active: self.model_name == "gpt-4o",
+            },
+            ModelEntry {
+                id: "gpt-4o-mini".to_string(),
+                name: "GPT-4o Mini".to_string(),
+                provider: "openai".to_string(),
+                context_window: 128_000,
+                is_active: self.model_name == "gpt-4o-mini",
+            },
+            ModelEntry {
+                id: "gemini-2.5-pro".to_string(),
+                name: "Gemini 2.5 Pro".to_string(),
+                provider: "gemini".to_string(),
+                context_window: 1_000_000,
+                is_active: self.model_name == "gemini-2.5-pro",
+            },
+            ModelEntry {
+                id: "gemini-2.5-flash".to_string(),
+                name: "Gemini 2.5 Flash".to_string(),
+                provider: "gemini".to_string(),
+                context_window: 1_000_000,
+                is_active: self.model_name == "gemini-2.5-flash",
+            },
+            ModelEntry {
+                id: "llama-3.3-70b".to_string(),
+                name: "Llama 3.3 70B".to_string(),
+                provider: "groq".to_string(),
+                context_window: 128_000,
+                is_active: self.model_name == "llama-3.3-70b",
+            },
+        ];
+        self.model_picker = Some(ModelPickerState::new(models));
     }
 
     #[allow(clippy::too_many_lines)]
