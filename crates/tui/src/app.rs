@@ -1,4 +1,5 @@
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -13,10 +14,13 @@ use crate::conversation::ConversationView;
 use crate::input::slash_commands::SlashCompleter;
 use crate::input::{InputMode, KeyAction, KeySequenceBuffer};
 use crate::layout::AppLayout;
+use crate::modes::{ModeState, PendingToolCall};
 use crate::runtime_bridge::RuntimeBridge;
+use crate::session_manager::SessionManager;
 use crate::theme::Theme;
 use crate::types::{Command, Event};
 use crate::widgets::{
+    approval_dialog::ApprovalDialog,
     autocomplete_dropdown::AutocompleteDropdown,
     context_panel::{ContextPanelWidget, ContextTab},
     conversation_panel::ConversationPanel,
@@ -24,6 +28,7 @@ use crate::widgets::{
     git_tab::GitTab,
     help_overlay::HelpOverlay,
     input_bar::{InputBar, InputBuffer},
+    session_picker::{SessionPicker, SessionPickerState},
     status_bar::StatusBar,
 };
 
@@ -50,10 +55,22 @@ struct App {
     files_tab: FilesTab,
     git_tab: GitTab,
     right_panel_pct: u16,
+    // Phase 05: session & mode state
+    mode_state: ModeState,
+    model_name: String,
+    total_tokens: u32,
+    total_cost_usd: f64,
+    session_name: String,
+    session_picker: Option<SessionPickerState>,
 }
 
 impl App {
-    fn new(cmd_tx: mpsc::Sender<Command>, event_rx: mpsc::Receiver<Event>) -> Self {
+    fn new(
+        cmd_tx: mpsc::Sender<Command>,
+        event_rx: mpsc::Receiver<Event>,
+        model_name: String,
+        session_name: String,
+    ) -> Self {
         let mut git_tab = GitTab::new();
         git_tab.refresh();
 
@@ -72,6 +89,12 @@ impl App {
             files_tab: FilesTab::new(),
             git_tab,
             right_panel_pct: 30,
+            mode_state: ModeState::new(),
+            model_name,
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            session_name,
+            session_picker: None,
         }
     }
 
@@ -79,7 +102,17 @@ impl App {
         let layout = AppLayout::new(frame.area(), self.right_panel_pct);
 
         frame.render_widget(
-            StatusBar::new(&self.theme, self.mode, self.key_seq.has_pending()),
+            StatusBar::new(
+                &self.theme,
+                self.mode,
+                self.mode_state.current,
+                self.key_seq.has_pending(),
+                &self.model_name,
+                self.total_tokens,
+                self.total_cost_usd,
+                &self.session_name,
+                self.conversation.is_streaming,
+            ),
             layout.status_bar,
         );
 
@@ -127,10 +160,50 @@ impl App {
         if self.mode == InputMode::Help {
             frame.render_widget(HelpOverlay { theme: &self.theme }, frame.area());
         }
+
+        // Session picker overlay
+        if let Some(picker) = &self.session_picker {
+            if picker.visible {
+                frame.render_widget(
+                    SessionPicker {
+                        sessions: &picker.sessions,
+                        selected: picker.selected,
+                        theme: &self.theme,
+                    },
+                    frame.area(),
+                );
+            }
+        }
+
+        // Approval dialog overlay
+        if let Some(pending) = &self.mode_state.pending_approval {
+            frame.render_widget(
+                ApprovalDialog {
+                    tool_name: &pending.tool_name,
+                    input_summary: &pending.input_summary,
+                    theme: &self.theme,
+                },
+                frame.area(),
+            );
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        // Global keybindings (work in any mode except Help)
+        // Session picker has priority when visible
+        if let Some(picker) = &mut self.session_picker {
+            if picker.visible {
+                self.handle_session_picker_key(code);
+                return;
+            }
+        }
+
+        // Approval dialog has priority when pending
+        if self.mode_state.pending_approval.is_some() {
+            self.handle_approval_key(code);
+            return;
+        }
+
+        // Help mode: any key exits
         if self.mode == InputMode::Help {
             self.mode = InputMode::Normal;
             return;
@@ -142,7 +215,6 @@ impl App {
                 if self.conversation.is_streaming {
                     let _ = self.cmd_tx.send(Command::Cancel);
                 } else if self.mode == InputMode::Insert {
-                    // Clear input in insert mode
                     self.input.take();
                     self.slash_completer.close();
                     self.mode = InputMode::Insert;
@@ -150,6 +222,17 @@ impl App {
                     self.should_quit = true;
                     let _ = self.cmd_tx.send(Command::Quit);
                 }
+                return;
+            }
+            // Global: Ctrl+S — force save session
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                let _ = self.cmd_tx.send(Command::SaveSession);
+                self.conversation.push_error("Session saving…".to_string());
+                return;
+            }
+            // Global: Ctrl+M — toggle Plan/Build mode
+            (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
+                self.mode_state.current = self.mode_state.current.toggle();
                 return;
             }
             // Global: panel width
@@ -208,13 +291,11 @@ impl App {
                 self.conversation.scroll_up(1);
             }
             // Multi-key sequences
-            KeyCode::Char(ch @ ('G' | 'g')) => {
-                match self.key_seq.feed(ch) {
-                    KeyAction::ScrollToTop => self.conversation.scroll_to_top(),
-                    KeyAction::ScrollToBottom => self.conversation.scroll_to_bottom(),
-                    KeyAction::Pending | KeyAction::None => {}
-                }
-            }
+            KeyCode::Char(ch @ ('G' | 'g')) => match self.key_seq.feed(ch) {
+                KeyAction::ScrollToTop => self.conversation.scroll_to_top(),
+                KeyAction::ScrollToBottom => self.conversation.scroll_to_bottom(),
+                KeyAction::Pending | KeyAction::None => {}
+            },
             // Tab: cycle focus
             KeyCode::Tab => {
                 self.focus = match self.focus {
@@ -285,7 +366,6 @@ impl App {
                 if let Some(name) = self.slash_completer.selected_name() {
                     let name = name.to_string();
                     self.input.take();
-                    // Insert the command name
                     for ch in name.chars() {
                         self.input.insert(ch);
                     }
@@ -314,6 +394,51 @@ impl App {
         }
     }
 
+    fn handle_session_picker_key(&mut self, code: KeyCode) {
+        let picker = self.session_picker.as_mut().unwrap();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => picker.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => picker.move_down(),
+            KeyCode::Enter => {
+                if let Some(id) = picker.selected_id() {
+                    let id = id.to_string();
+                    self.conversation
+                        .push_error(format!("Loading session: {id}…"));
+                    // TODO: actually load session into runtime (requires bridge command)
+                }
+                picker.close();
+                self.session_picker = None;
+            }
+            KeyCode::Char('n') => {
+                picker.close();
+                self.session_picker = None;
+                self.conversation
+                    .push_error("New session created.".to_string());
+            }
+            KeyCode::Esc => {
+                picker.close();
+                self.session_picker = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_approval_key(&mut self, code: KeyCode) {
+        let approved = match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => false,
+            _ => return, // ignore other keys
+        };
+
+        if let Some(pending) = self.mode_state.pending_approval.take() {
+            let _ = pending.respond.send(approved);
+            if !approved {
+                self.conversation
+                    .push_error(format!("Tool '{}' denied.", pending.tool_name));
+            }
+        }
+    }
+
     fn handle_submit(&mut self, text: String) {
         // Handle slash commands
         if text.starts_with('/') {
@@ -326,7 +451,7 @@ impl App {
     }
 
     fn handle_slash_command(&mut self, cmd: &str) {
-        let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+        let parts: Vec<&str> = cmd.splitn(3, ' ').collect();
         match parts[0] {
             "/clear" => {
                 self.conversation = ConversationView::new();
@@ -338,8 +463,59 @@ impl App {
                 self.should_quit = true;
                 let _ = self.cmd_tx.send(Command::Quit);
             }
+            "/compact" => {
+                let _ = self.cmd_tx.send(Command::Compact);
+                self.conversation
+                    .push_error("Compacting session…".to_string());
+            }
+            "/session" => {
+                let sub = parts.get(1).copied().unwrap_or("list");
+                match sub {
+                    "list" => self.show_session_picker(),
+                    "new" => {
+                        self.conversation
+                            .push_error("New session — restart to create.".to_string());
+                    }
+                    "load" => {
+                        if let Some(id) = parts.get(2) {
+                            self.conversation
+                                .push_error(format!("Loading session: {id}…"));
+                        } else {
+                            self.show_session_picker();
+                        }
+                    }
+                    _ => {
+                        self.conversation
+                            .push_error(format!("Unknown /session subcommand: {sub}"));
+                    }
+                }
+            }
+            "/model" => {
+                self.conversation
+                    .push_error(format!("Current model: {}", self.model_name));
+            }
             _ => {
-                self.conversation.push_error(format!("Unknown command: {cmd}"));
+                self.conversation
+                    .push_error(format!("Unknown command: {cmd}"));
+            }
+        }
+    }
+
+    fn show_session_picker(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        match SessionManager::new(&cwd) {
+            Ok(mgr) => match mgr.list_sessions() {
+                Ok(sessions) => {
+                    self.session_picker = Some(SessionPickerState::new(sessions));
+                }
+                Err(e) => {
+                    self.conversation
+                        .push_error(format!("Failed to list sessions: {e}"));
+                }
+            },
+            Err(e) => {
+                self.conversation
+                    .push_error(format!("Session manager error: {e}"));
             }
         }
     }
@@ -351,6 +527,8 @@ impl App {
                     self.conversation.push_token(&token);
                 }
                 Event::AssistantDone(meta) => {
+                    self.total_tokens = meta.total_tokens;
+                    self.total_cost_usd = meta.total_cost_usd;
                     self.conversation.finish_assistant_message(meta);
                 }
                 Event::ToolStart { name } => {
@@ -362,6 +540,28 @@ impl App {
                         .push_token(&format!("[result: {result}]\n"));
                     self.git_tab.mark_dirty();
                     self.git_tab.refresh();
+                }
+                Event::ToolApprovalNeeded {
+                    tool_name,
+                    input_summary,
+                    respond,
+                } => {
+                    self.mode_state.pending_approval = Some(PendingToolCall {
+                        tool_name,
+                        input_summary,
+                        respond,
+                    });
+                }
+                Event::SessionSaved => {
+                    self.conversation.push_error("Session saved.".to_string());
+                }
+                Event::CompactDone {
+                    removed_messages,
+                    summary,
+                } => {
+                    self.conversation.push_error(format!(
+                        "Compact: removed {removed_messages} msgs. {summary}"
+                    ));
                 }
                 Event::Error(msg) => {
                     self.conversation.push_error(msg);
@@ -391,11 +591,15 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
 pub async fn run() -> anyhow::Result<()> {
     let model =
         std::env::var("OCX_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let (cmd_tx, event_rx) = RuntimeBridge::spawn(model);
+    let (cmd_tx, event_rx) = RuntimeBridge::spawn(model.clone(), workspace_root);
 
     let mut terminal = setup_terminal()?;
-    let mut app = App::new(cmd_tx, event_rx);
+
+    // Derive a short session name from the model
+    let session_name = "new session".to_string();
+    let mut app = App::new(cmd_tx, event_rx, model, session_name);
 
     loop {
         terminal.draw(|frame| app.render(frame))?;

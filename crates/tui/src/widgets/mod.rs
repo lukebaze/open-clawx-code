@@ -1,3 +1,4 @@
+pub mod approval_dialog;
 pub mod autocomplete_dropdown;
 pub mod context_panel;
 pub mod conversation_panel;
@@ -6,5 +7,6 @@ pub mod git_tab;
 pub mod help_overlay;
 pub mod input_bar;
 pub mod placeholder;
+pub mod session_picker;
 pub mod status_bar;
 pub mod tool_block;
