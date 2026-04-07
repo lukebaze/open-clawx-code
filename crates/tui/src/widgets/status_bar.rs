@@ -10,7 +10,7 @@ use crate::input::InputMode;
 use crate::modes::AgentMode;
 use crate::theme::Theme;
 
-/// Top status bar showing model, mode, session info, tokens, and cost.
+/// Top status bar showing model, mode, session info, tokens, cost, and TDD state.
 pub struct StatusBar<'a> {
     theme: &'a Theme,
     input_mode: InputMode,
@@ -21,6 +21,12 @@ pub struct StatusBar<'a> {
     total_cost_usd: f64,
     session_name: &'a str,
     is_streaming: bool,
+    /// TDD phase label (e.g., "RED", "GREEN", "E2E") — only in Build mode.
+    tdd_phase: Option<&'a str>,
+    /// Orchestrator iteration "current/max" — only in Build mode.
+    iteration: Option<(u32, u32)>,
+    /// Test result summary (e.g., "14/14") — only after tests run.
+    test_summary: Option<&'a str>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -35,6 +41,9 @@ impl<'a> StatusBar<'a> {
         total_cost_usd: f64,
         session_name: &'a str,
         is_streaming: bool,
+        tdd_phase: Option<&'a str>,
+        iteration: Option<(u32, u32)>,
+        test_summary: Option<&'a str>,
     ) -> Self {
         Self {
             theme,
@@ -46,6 +55,9 @@ impl<'a> StatusBar<'a> {
             total_cost_usd,
             session_name,
             is_streaming,
+            tdd_phase,
+            iteration,
+            test_summary,
         }
     }
 }
@@ -79,15 +91,30 @@ impl Widget for StatusBar<'_> {
 
         let dim = Style::new().fg(self.theme.dim).bg(self.theme.status_bg);
 
-        // Left side: app name + model + mode badge
+        // Left side: app name + model + mode badge + TDD info
+        let mode_label = if self.agent_mode == AgentMode::Build {
+            if let (Some(phase), Some((cur, max))) = (self.tdd_phase, self.iteration) {
+                format!(" Build: {phase} {cur}/{max} ")
+            } else {
+                format!(" {} ", self.agent_mode.label())
+            }
+        } else {
+            format!(" {} ", self.agent_mode.label())
+        };
+
         let mut left_spans = vec![
             Span::styled(
                 " OCX ",
                 Style::new().fg(self.theme.accent).bg(self.theme.status_bg),
             ),
             Span::styled(format!(" {} ", self.model), dim),
-            Span::styled(format!(" {} ", self.agent_mode.label()), mode_style),
+            Span::styled(mode_label, mode_style),
         ];
+
+        // Test summary badge (if available)
+        if let Some(tests) = self.test_summary {
+            left_spans.push(Span::styled(format!(" [{tests}] "), dim));
+        }
 
         if self.pending_key {
             left_spans.push(Span::styled(" g-", dim));

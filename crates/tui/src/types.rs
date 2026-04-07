@@ -1,3 +1,6 @@
+use ocx_gitnexus::ImpactResult;
+use ocx_orchestrator::{FailureContext, TddPhase, TestResult, TestType};
+
 /// Commands sent from TUI to the runtime bridge
 pub enum Command {
     /// User submitted a message
@@ -8,6 +11,9 @@ pub enum Command {
     Compact,
     /// Cancel current operation
     Cancel,
+    /// Resume Build mode after pause (wired in Phase 06+)
+    #[allow(dead_code)]
+    ResumeBuild,
     /// Quit the application
     Quit,
 }
@@ -36,6 +42,48 @@ pub enum Event {
         removed_messages: usize,
         summary: String,
     },
+
+    // --- TDD Orchestrator events ---
+    /// TDD phase transition
+    TddPhaseChanged { phase: TddPhase, detail: String },
+    /// Test suite started
+    TestRunStarted { test_type: TestType, scope: String },
+    /// Test suite completed
+    TestRunCompleted {
+        test_type: TestType,
+        result: TestResult,
+    },
+    /// Retrying after test failure
+    TestRetrying {
+        attempt: u8,
+        max: u8,
+        test_name: String,
+    },
+    /// All retries exhausted
+    TestRetryExhausted {
+        phase: TddPhase,
+        failure: FailureContext,
+    },
+    /// Orchestrator iteration count updated
+    IterationUpdated { current: u32, max: u32 },
+    /// Max iterations reached
+    MaxIterationsReached { count: u32 },
+    /// Build mode task completed
+    BuildDone { summary: String },
+    /// Build mode task failed
+    BuildFailed {
+        message: String,
+        #[allow(dead_code)]
+        context: Option<FailureContext>,
+    },
+
+    // --- GitNexus events ---
+    /// Pre-edit impact gate triggered (HIGH/CRITICAL risk)
+    ImpactGateTriggered {
+        impact: ImpactResult,
+        respond: std::sync::mpsc::Sender<bool>,
+    },
+
     /// Error during runtime operation
     Error(String),
 }

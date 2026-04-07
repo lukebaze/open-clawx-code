@@ -23,6 +23,10 @@ claw-runtime = { path = "crates/claw-runtime" }
 claw-plugins = { path = "crates/claw-plugins" }
 claw-telemetry = { path = "crates/claw-telemetry" }
 
+# OCX crates
+ocx-gitnexus = { path = "crates/gitnexus" }
+ocx-orchestrator = { path = "crates/orchestrator" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

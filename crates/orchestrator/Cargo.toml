@@ -1,19 +1,16 @@
 [package]
-name = "ocx-tui"
+name = "ocx-orchestrator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-claw-api.workspace = true
 claw-runtime.workspace = true
 ocx-gitnexus = { path = "../gitnexus" }
-ocx-orchestrator = { path = "../orchestrator" }
-ratatui.workspace = true
-crossterm.workspace = true
-tokio.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

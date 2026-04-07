@@ -6,6 +6,7 @@ use claw_runtime::{
     CompactionConfig, ConversationRuntime, PermissionMode, PermissionPolicy, RuntimeError, Session,
     ToolError, ToolExecutor, UsageTracker,
 };
+use ocx_orchestrator::{Orchestrator, OrchestratorEvent};
 
 use crate::modes::AgentMode;
 use crate::session_manager::SessionManager;
@@ -57,9 +58,8 @@ impl ToolExecutor for TuiToolExecutor {
                 input_summary,
                 respond: respond_tx,
             });
-            // Block until user responds (with 30s timeout)
             match respond_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(true) => {} // approved
+                Ok(true) => {}
                 Ok(false) => {
                     return Ok(format!("Tool '{tool_name}' denied by user"));
                 }
@@ -83,7 +83,7 @@ impl ToolExecutor for TuiToolExecutor {
     }
 }
 
-/// Bridges TUI commands to `ConversationRuntime`.
+/// Bridges TUI commands to `ConversationRuntime` + `Orchestrator`.
 /// Runs on a dedicated OS thread (runtime types are !Send).
 pub struct RuntimeBridge;
 
@@ -111,7 +111,7 @@ impl RuntimeBridge {
         model: String,
         workspace_root: PathBuf,
     ) {
-        // Initialize session manager and create/load session
+        // Initialize session manager and create session
         let mut session_mgr = match SessionManager::new(&workspace_root) {
             Ok(mgr) => mgr,
             Err(e) => {
@@ -130,6 +130,10 @@ impl RuntimeBridge {
 
         let mut usage_tracker = UsageTracker::from_session(&session);
         let pricing = pricing_for_model(&model);
+
+        // Initialize orchestrator (for Build mode TDD)
+        let (orch_event_tx, orch_event_rx) = mpsc::channel::<OrchestratorEvent>();
+        let _orchestrator = Orchestrator::new(&workspace_root, orch_event_tx);
 
         let api_client = TuiApiClient {
             event_tx: event_tx.clone(),
@@ -150,6 +154,11 @@ impl RuntimeBridge {
         .with_max_iterations(10);
 
         while let Ok(cmd) = cmd_rx.recv() {
+            // Drain orchestrator events and forward to TUI
+            while let Ok(orch_event) = orch_event_rx.try_recv() {
+                forward_orchestrator_event(&event_tx, orch_event);
+            }
+
             match cmd {
                 Command::SendMessage(text) => {
                     let result = runtime.run_turn(&text, None);
@@ -190,7 +199,6 @@ impl RuntimeBridge {
                 },
                 Command::Compact => {
                     let config = CompactionConfig::default();
-                    // Simple compaction: summarize old messages
                     let token_est = estimate_session_tokens(runtime.session());
                     if token_est < config.max_estimated_tokens {
                         let _ =
@@ -204,9 +212,58 @@ impl RuntimeBridge {
                         });
                     }
                 }
+                Command::ResumeBuild => {
+                    let _ = event_tx.send(Event::Error(
+                        "Build mode resume not yet connected to orchestrator".to_string(),
+                    ));
+                }
                 Command::Cancel => {}
                 Command::Quit => break,
             }
+        }
+    }
+}
+
+/// Forward orchestrator events to TUI event channel.
+fn forward_orchestrator_event(event_tx: &mpsc::Sender<Event>, orch_event: OrchestratorEvent) {
+    match orch_event {
+        OrchestratorEvent::PhaseChanged { phase, detail } => {
+            let _ = event_tx.send(Event::TddPhaseChanged { phase, detail });
+        }
+        OrchestratorEvent::TestRunStarted { test_type, scope } => {
+            let _ = event_tx.send(Event::TestRunStarted { test_type, scope });
+        }
+        OrchestratorEvent::TestRunCompleted { test_type, result } => {
+            let _ = event_tx.send(Event::TestRunCompleted { test_type, result });
+        }
+        OrchestratorEvent::TestRetrying {
+            attempt,
+            max,
+            test_name,
+        } => {
+            let _ = event_tx.send(Event::TestRetrying {
+                attempt,
+                max,
+                test_name,
+            });
+        }
+        OrchestratorEvent::TestRetryExhausted { phase, failure } => {
+            let _ = event_tx.send(Event::TestRetryExhausted { phase, failure });
+        }
+        OrchestratorEvent::ImpactGateTriggered { impact, respond } => {
+            let _ = event_tx.send(Event::ImpactGateTriggered { impact, respond });
+        }
+        OrchestratorEvent::IterationUpdated { current, max } => {
+            let _ = event_tx.send(Event::IterationUpdated { current, max });
+        }
+        OrchestratorEvent::MaxIterationsReached { count } => {
+            let _ = event_tx.send(Event::MaxIterationsReached { count });
+        }
+        OrchestratorEvent::Done { summary } => {
+            let _ = event_tx.send(Event::BuildDone { summary });
+        }
+        OrchestratorEvent::Failed { message, context } => {
+            let _ = event_tx.send(Event::BuildFailed { message, context });
         }
     }
 }

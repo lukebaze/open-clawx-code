@@ -14,7 +14,7 @@ use crate::conversation::ConversationView;
 use crate::input::slash_commands::SlashCompleter;
 use crate::input::{InputMode, KeyAction, KeySequenceBuffer};
 use crate::layout::AppLayout;
-use crate::modes::{ModeState, PendingToolCall};
+use crate::modes::{ModeState, PendingImpactApproval, PendingToolCall};
 use crate::runtime_bridge::RuntimeBridge;
 use crate::session_manager::SessionManager;
 use crate::theme::Theme;
@@ -26,7 +26,9 @@ use crate::widgets::{
     conversation_panel::ConversationPanel,
     files_tab::FilesTab,
     git_tab::GitTab,
+    gitnexus_tab::GitNexusTab,
     help_overlay::HelpOverlay,
+    impact_dialog::ImpactDialog,
     input_bar::{InputBar, InputBuffer},
     session_picker::{SessionPicker, SessionPickerState},
     status_bar::StatusBar,
@@ -55,6 +57,7 @@ struct App {
     files_tab: FilesTab,
     git_tab: GitTab,
     right_panel_pct: u16,
+    gitnexus_tab: GitNexusTab,
     // Phase 05: session & mode state
     mode_state: ModeState,
     model_name: String,
@@ -88,6 +91,7 @@ impl App {
             active_tab: ContextTab::Files,
             files_tab: FilesTab::new(),
             git_tab,
+            gitnexus_tab: GitNexusTab::new(false), // availability checked later
             right_panel_pct: 30,
             mode_state: ModeState::new(),
             model_name,
@@ -101,6 +105,15 @@ impl App {
     fn render(&self, frame: &mut Frame) {
         let layout = AppLayout::new(frame.area(), self.right_panel_pct);
 
+        let tdd_phase_label = self
+            .mode_state
+            .tdd_phase
+            .map(ocx_orchestrator::TddPhase::label);
+        let iteration = if self.mode_state.current == crate::modes::AgentMode::Build {
+            Some(self.mode_state.iteration)
+        } else {
+            None
+        };
         frame.render_widget(
             StatusBar::new(
                 &self.theme,
@@ -112,6 +125,9 @@ impl App {
                 self.total_cost_usd,
                 &self.session_name,
                 self.conversation.is_streaming,
+                tdd_phase_label,
+                iteration,
+                self.mode_state.test_summary.as_deref(),
             ),
             layout.status_bar,
         );
@@ -186,6 +202,17 @@ impl App {
                 frame.area(),
             );
         }
+
+        // Impact gate dialog overlay
+        if let Some(pending) = &self.mode_state.pending_impact {
+            frame.render_widget(
+                ImpactDialog {
+                    impact: &pending.impact,
+                    theme: &self.theme,
+                },
+                frame.area(),
+            );
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
@@ -200,6 +227,12 @@ impl App {
         // Approval dialog has priority when pending
         if self.mode_state.pending_approval.is_some() {
             self.handle_approval_key(code);
+            return;
+        }
+
+        // Impact gate dialog has priority
+        if self.mode_state.pending_impact.is_some() {
+            self.handle_impact_key(code);
             return;
         }
 
@@ -427,7 +460,7 @@ impl App {
         let approved = match code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
             KeyCode::Char('n' | 'N') | KeyCode::Esc => false,
-            _ => return, // ignore other keys
+            _ => return,
         };
 
         if let Some(pending) = self.mode_state.pending_approval.take() {
@@ -436,6 +469,30 @@ impl App {
                 self.conversation
                     .push_error(format!("Tool '{}' denied.", pending.tool_name));
             }
+        }
+    }
+
+    fn handle_impact_key(&mut self, code: KeyCode) {
+        let approved = match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => false,
+            _ => return,
+        };
+
+        if let Some(pending) = self.mode_state.pending_impact.take() {
+            let _ = pending.respond.send(approved);
+            if approved {
+                self.conversation
+                    .push_error(format!("Impact approved for '{}'.", pending.impact.symbol));
+            } else {
+                self.conversation.push_error(format!(
+                    "Edit blocked: {} risk on '{}'.",
+                    pending.impact.risk_level.label(),
+                    pending.impact.symbol
+                ));
+            }
+            // Store impact in the GitNexus tab
+            self.gitnexus_tab.push_impact(pending.impact);
         }
     }
 
@@ -520,6 +577,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -563,6 +621,73 @@ impl App {
                         "Compact: removed {removed_messages} msgs. {summary}"
                     ));
                 }
+                // TDD Orchestrator events
+                Event::TddPhaseChanged { phase, detail } => {
+                    self.mode_state.tdd_phase = Some(phase);
+                    let msg = if detail.is_empty() {
+                        format!("TDD: {}", phase.label())
+                    } else {
+                        format!("TDD: {} ({})", phase.label(), detail)
+                    };
+                    self.conversation.push_error(msg);
+                }
+                Event::TestRunStarted { test_type, scope } => {
+                    self.conversation
+                        .push_error(format!("Running {} tests: {scope}…", test_type.label()));
+                }
+                Event::TestRunCompleted { test_type, result } => {
+                    let status = if result.passed { "PASS" } else { "FAIL" };
+                    let summary = format!("{}/{}", result.total - result.failed, result.total);
+                    self.mode_state.test_summary = Some(summary.clone());
+                    self.conversation.push_error(format!(
+                        "{} tests: {status} ({summary}) in {}ms",
+                        test_type.label(),
+                        result.duration_ms
+                    ));
+                }
+                Event::TestRetrying {
+                    attempt,
+                    max,
+                    test_name,
+                } => {
+                    self.conversation
+                        .push_error(format!("Retrying '{test_name}' ({attempt}/{max})…"));
+                }
+                Event::TestRetryExhausted { phase, failure } => {
+                    self.conversation.push_error(format!(
+                        "FAILED: {} after {} retries. Pausing Build mode.",
+                        phase.label(),
+                        failure.attempt_count
+                    ));
+                    self.mode_state.current = crate::modes::AgentMode::Plan;
+                }
+                Event::IterationUpdated { current, max } => {
+                    self.mode_state.iteration = (current, max);
+                }
+                Event::MaxIterationsReached { count } => {
+                    self.conversation.push_error(format!(
+                        "Max iterations ({count}) reached — Build mode paused."
+                    ));
+                    self.mode_state.current = crate::modes::AgentMode::Plan;
+                }
+                Event::BuildDone { summary } => {
+                    self.mode_state.tdd_phase = None;
+                    self.conversation
+                        .push_error(format!("Build complete: {summary}"));
+                }
+                Event::BuildFailed { message, .. } => {
+                    self.mode_state.tdd_phase = None;
+                    self.mode_state.current = crate::modes::AgentMode::Plan;
+                    self.conversation
+                        .push_error(format!("Build failed: {message}"));
+                }
+                // GitNexus events
+                Event::ImpactGateTriggered { impact, respond } => {
+                    self.gitnexus_tab.push_impact(impact.clone());
+                    self.mode_state.pending_impact =
+                        Some(PendingImpactApproval { impact, respond });
+                }
+
                 Event::Error(msg) => {
                     self.conversation.push_error(msg);
                 }
