@@ -1,0 +1,25 @@
+[package]
+name = "claw-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+glob = "0.3"
+claw-plugins = { path = "../claw-plugins" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+claw-telemetry = { path = "../claw-telemetry" }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "time"] }
+walkdir = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+dead_code = "allow"
+
+[lints.clippy]
+all = "allow"
+pedantic = "allow"
