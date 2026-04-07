@@ -19,10 +19,12 @@ use crate::runtime_bridge::RuntimeBridge;
 use crate::session_manager::SessionManager;
 use crate::theme::Theme;
 use crate::types::{Command, Event};
+use crate::config::UserConfig;
 use crate::widgets::{
     agent_team_panel::AgentTeamPanel,
     approval_dialog::ApprovalDialog,
     autocomplete_dropdown::AutocompleteDropdown,
+    config_editor::{ConfigEditor, ConfigEditorState},
     context_panel::{ContextPanelWidget, ContextTab},
     conversation_panel::ConversationPanel,
     diagnostics_tab::DiagnosticsTab,
@@ -71,6 +73,8 @@ struct App {
     session_name: String,
     session_picker: Option<SessionPickerState>,
     model_picker: Option<ModelPickerState>,
+    config_editor: Option<ConfigEditorState>,
+    user_config: UserConfig,
 }
 
 impl App {
@@ -108,6 +112,8 @@ impl App {
             session_name,
             session_picker: None,
             model_picker: None,
+            config_editor: None,
+            user_config: UserConfig::default(),
         };
 
         // Show splash screen on startup
@@ -237,6 +243,20 @@ impl App {
             }
         }
 
+        // Config editor overlay
+        if let Some(editor) = &self.config_editor {
+            if editor.visible {
+                frame.render_widget(
+                    ConfigEditor {
+                        fields: &editor.fields,
+                        selected: editor.selected,
+                        theme: &self.theme,
+                    },
+                    frame.area(),
+                );
+            }
+        }
+
         // Impact gate dialog overlay
         if let Some(pending) = &self.mode_state.pending_impact {
             frame.render_widget(
@@ -250,6 +270,14 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Config editor has priority when visible
+        if let Some(editor) = &mut self.config_editor {
+            if editor.visible {
+                self.handle_config_editor_key(code);
+                return;
+            }
+        }
+
         // Model picker has priority when visible
         if let Some(picker) = &mut self.model_picker {
             if picker.visible {
@@ -475,6 +503,41 @@ impl App {
         }
     }
 
+    fn handle_config_editor_key(&mut self, code: KeyCode) {
+        let editor = self.config_editor.as_mut().unwrap();
+        if editor.is_editing() {
+            match code {
+                KeyCode::Esc | KeyCode::Enter => editor.stop_editing(),
+                KeyCode::Char(ch) => editor.type_char(ch),
+                KeyCode::Backspace => editor.backspace(),
+                _ => {}
+            }
+            return;
+        }
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => editor.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => editor.move_down(),
+            KeyCode::Enter => editor.start_editing(),
+            KeyCode::Esc => {
+                // Save and close
+                if editor.dirty {
+                    editor.apply_to(&mut self.user_config);
+                    self.user_config.apply_to_env();
+                    if let Err(e) = self.user_config.save() {
+                        self.conversation
+                            .push_error(format!("Config save failed: {e}"));
+                    } else {
+                        self.conversation
+                            .push_error("Config saved.".to_string());
+                    }
+                }
+                editor.close();
+                self.config_editor = None;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_model_picker_key(&mut self, code: KeyCode) {
         let picker = self.model_picker.as_mut().unwrap();
         match code {
@@ -618,6 +681,10 @@ impl App {
                             .push_error(format!("Unknown /session subcommand: {sub}"));
                     }
                 }
+            }
+            "/config" => {
+                self.config_editor =
+                    Some(ConfigEditorState::from_config(&self.user_config));
             }
             "/model" => {
                 if let Some(&model_id) = parts.get(1) {
@@ -905,17 +972,24 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
 
 /// Entry point — sets up terminal, spawns runtime bridge, runs event loop
 pub async fn run() -> anyhow::Result<()> {
-    let model =
-        std::env::var("OCX_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+    // Load user config and apply API keys to env
+    let user_config = UserConfig::load();
+    user_config.apply_to_env();
+
+    let model = user_config
+        .default_model
+        .clone()
+        .or_else(|| std::env::var("OCX_MODEL").ok())
+        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let (cmd_tx, event_rx) = RuntimeBridge::spawn(model.clone(), workspace_root);
 
     let mut terminal = setup_terminal()?;
 
-    // Derive a short session name from the model
     let session_name = "new session".to_string();
     let mut app = App::new(cmd_tx, event_rx, model, session_name);
+    app.user_config = user_config;
 
     loop {
         terminal.draw(|frame| app.render(frame))?;

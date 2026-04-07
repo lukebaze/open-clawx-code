@@ -1,4 +1,5 @@
 mod app;
+pub mod config;
 mod conversation;
 mod input;
 mod layout;
