@@ -58,24 +58,89 @@ impl Provider for AnthropicProvider {
         ]
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn send_message(&self, request: &MessageRequest) -> anyhow::Result<Vec<StreamChunk>> {
-        // Stub — real integration wraps claw-api AnthropicClient
-        let _ = &self.api_key;
+        let client = reqwest::Client::new();
+
+        // Build messages array from the request
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m.role,
+                    "content": m.content
+                })
+            })
+            .collect();
+
+        // Concatenate system prompts with newlines
+        let system = request.system.join("\n");
+
+        let body = serde_json::json!({
+            "model": request.model,
+            "max_tokens": request.max_tokens,
+            "system": system,
+            "messages": messages
+        });
+
+        let response = client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Anthropic API error ({status}): {error_body}");
+        }
+
+        let json: serde_json::Value = response.json().await?;
+
+        let text = json["content"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|c| c["text"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let input_tokens = json["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+
         Ok(vec![
-            StreamChunk::TextDelta(format!(
-                "[anthropic/{}] provider connected but streaming not yet wired",
-                request.model
-            )),
+            StreamChunk::TextDelta(text),
             StreamChunk::Usage {
-                input_tokens: 0,
-                output_tokens: 0,
+                input_tokens,
+                output_tokens,
             },
             StreamChunk::Done,
         ])
     }
 
     async fn validate_key(&self) -> anyhow::Result<bool> {
-        Ok(!self.api_key.is_empty())
+        if self.api_key.is_empty() {
+            return Ok(false);
+        }
+        // Quick validation: send a minimal request; 401 means invalid key
+        let client = reqwest::Client::new();
+        let resp = client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": "claude-haiku-4-20250514",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await?;
+        // 200 or 400 (bad request body) means key authenticated; 401 means invalid
+        Ok(resp.status() != reqwest::StatusCode::UNAUTHORIZED)
     }
 
     fn estimate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {

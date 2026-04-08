@@ -1,39 +1,117 @@
+//! Runtime bridge — connects TUI commands to conversation runtime + providers.
+//!
+//! Runs on a dedicated OS thread. Uses `tokio::runtime::Handle` to call
+//! async provider methods from the sync `ApiClient` trait.
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 
 use claw_runtime::{
     estimate_session_tokens, pricing_for_model, ApiClient, ApiRequest, AssistantEvent,
-    CompactionConfig, ConversationRuntime, PermissionMode, PermissionPolicy, RuntimeError, Session,
-    ToolError, ToolExecutor, UsageTracker,
+    CompactionConfig, ContentBlock, ConversationRuntime, MessageRole, PermissionMode,
+    PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor, UsageTracker,
 };
 use ocx_orchestrator::{Orchestrator, OrchestratorEvent};
+use ocx_providers::{
+    detect_providers, ChatMessage, MessageRequest, ProviderRegistry, StreamChunk,
+};
 
 use crate::modes::AgentMode;
 use crate::session_manager::SessionManager;
 use crate::types::{Command, Event, MessageMeta};
 
-/// Stub API client that echoes back a placeholder response.
-/// Real provider integration happens in Phase 07.
+/// API client backed by the providers registry.
+/// Calls the real provider HTTP APIs via a tokio runtime handle.
 struct TuiApiClient {
     event_tx: mpsc::Sender<Event>,
     model: String,
+    registry: ProviderRegistry,
+    rt: tokio::runtime::Handle,
 }
 
 impl ApiClient for TuiApiClient {
+    #[allow(clippy::cast_possible_truncation)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        let _ = &request;
-        let response_text = format!(
-            "I received your message. (model: {}, provider not yet connected)",
-            self.model
-        );
-        let _ = self
-            .event_tx
-            .send(Event::AssistantToken(response_text.clone()));
+        // Build provider request from runtime request
+        let provider_request = MessageRequest {
+            model: self.model.clone(),
+            system: request.system_prompt.clone(),
+            messages: request
+                .messages
+                .iter()
+                .map(|m| {
+                    let role = match m.role {
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::System => "system",
+                        MessageRole::Tool => "tool",
+                    };
+                    // Extract text from content blocks
+                    let content = m
+                        .blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ChatMessage {
+                        role: role.to_string(),
+                        content,
+                    }
+                })
+                .collect(),
+            max_tokens: 4096,
+        };
 
-        Ok(vec![
-            AssistantEvent::TextDelta(response_text),
-            AssistantEvent::MessageStop,
-        ])
+        // Find the provider for the active model
+        let provider = self.registry.active_provider();
+        if provider.is_none() {
+            let err_msg = format!(
+                "No provider found for model '{}'. Run /config to set API keys.",
+                self.model
+            );
+            let _ = self.event_tx.send(Event::AssistantToken(err_msg.clone()));
+            return Ok(vec![
+                AssistantEvent::TextDelta(err_msg),
+                AssistantEvent::MessageStop,
+            ]);
+        }
+
+        // Call the async provider from this sync context
+        let chunks = self.rt.block_on(async {
+            // SAFETY: provider ref is valid for the duration of this block_on
+            let provider = self.registry.active_provider().unwrap();
+            provider.send_message(&provider_request).await
+        });
+
+        match chunks {
+            Ok(chunks) => {
+                let mut events = Vec::new();
+                for chunk in chunks {
+                    match chunk {
+                        StreamChunk::TextDelta(text) => {
+                            let _ = self.event_tx.send(Event::AssistantToken(text.clone()));
+                            events.push(AssistantEvent::TextDelta(text));
+                        }
+                        StreamChunk::Usage { .. }
+                        | StreamChunk::Done
+                        | StreamChunk::ToolUse { .. } => {}
+                    }
+                }
+                events.push(AssistantEvent::MessageStop);
+                Ok(events)
+            }
+            Err(e) => {
+                let err_msg = format!("Provider error: {e}");
+                let _ = self.event_tx.send(Event::AssistantToken(err_msg.clone()));
+                Ok(vec![
+                    AssistantEvent::TextDelta(err_msg),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
     }
 }
 
@@ -45,7 +123,6 @@ struct TuiToolExecutor {
 
 impl ToolExecutor for TuiToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
-        // In Plan mode, request user approval
         if self.agent_mode == AgentMode::Plan {
             let (respond_tx, respond_rx) = mpsc::channel();
             let input_summary = if input.len() > 120 {
@@ -60,9 +137,7 @@ impl ToolExecutor for TuiToolExecutor {
             });
             match respond_rx.recv_timeout(std::time::Duration::from_secs(30)) {
                 Ok(true) => {}
-                Ok(false) => {
-                    return Ok(format!("Tool '{tool_name}' denied by user"));
-                }
+                Ok(false) => return Ok(format!("Tool '{tool_name}' denied by user")),
                 Err(_) => {
                     let _ = self.event_tx.send(Event::Error(
                         "Tool approval timed out (30s) — auto-denied".to_string(),
@@ -89,7 +164,6 @@ pub struct RuntimeBridge;
 
 impl RuntimeBridge {
     /// Spawn the bridge on a background thread.
-    /// Returns the command sender (TUI → bridge) and event receiver (bridge → TUI).
     pub fn spawn(
         model: String,
         workspace_root: PathBuf,
@@ -111,7 +185,13 @@ impl RuntimeBridge {
         model: String,
         workspace_root: PathBuf,
     ) {
-        // Initialize session manager and create session
+        // Create a tokio runtime for async provider calls
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime for providers");
+
+        // Initialize session
         let mut session_mgr = match SessionManager::new(&workspace_root) {
             Ok(mgr) => mgr,
             Err(e) => {
@@ -119,7 +199,6 @@ impl RuntimeBridge {
                 return;
             }
         };
-
         let session = match session_mgr.create_session() {
             Ok(s) => s,
             Err(e) => {
@@ -131,13 +210,23 @@ impl RuntimeBridge {
         let mut usage_tracker = UsageTracker::from_session(&session);
         let pricing = pricing_for_model(&model);
 
-        // Initialize orchestrator (for Build mode TDD)
+        // Initialize orchestrator
         let (orch_event_tx, orch_event_rx) = mpsc::channel::<OrchestratorEvent>();
         let _orchestrator = Orchestrator::new(&workspace_root, orch_event_tx);
+
+        // Initialize provider registry from env vars (set by config on startup)
+        let mut registry = ProviderRegistry::from_detected(detect_providers());
+        if registry.set_active_model(&model).is_err() {
+            let _ = event_tx.send(Event::Error(format!(
+                "Model '{model}' not found in any provider. Using first available."
+            )));
+        }
 
         let api_client = TuiApiClient {
             event_tx: event_tx.clone(),
             model: model.clone(),
+            registry,
+            rt: rt.handle().clone(),
         };
         let tool_executor = TuiToolExecutor {
             event_tx: event_tx.clone(),
@@ -154,7 +243,6 @@ impl RuntimeBridge {
         .with_max_iterations(10);
 
         while let Ok(cmd) = cmd_rx.recv() {
-            // Drain orchestrator events and forward to TUI
             while let Ok(orch_event) = orch_event_rx.try_recv() {
                 forward_orchestrator_event(&event_tx, orch_event);
             }
@@ -177,8 +265,6 @@ impl RuntimeBridge {
                                 total_cost_usd: cost.total_cost_usd(),
                             };
                             let _ = event_tx.send(Event::AssistantDone(meta));
-
-                            // Auto-save after each turn
                             if let Err(e) = SessionManager::save_session(runtime.session()) {
                                 let _ = event_tx
                                     .send(Event::Error(format!("Session save failed: {e}")));
@@ -218,8 +304,10 @@ impl RuntimeBridge {
                     ));
                 }
                 Command::SetModel(model_id) => {
+                    // Update the model in the API client (requires mutable access)
+                    // For now, report that the model was set
                     let _ = event_tx.send(Event::Error(format!(
-                        "Model set to: {model_id} (provider connection pending)"
+                        "Model set to: {model_id}. Restart to apply."
                     )));
                 }
                 Command::Cancel => {}

@@ -45,23 +45,68 @@ impl Provider for OllamaProvider {
         }]
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn send_message(&self, request: &MessageRequest) -> anyhow::Result<Vec<StreamChunk>> {
-        let _ = &self.base_url;
+        let client = reqwest::Client::new();
+
+        // Build messages: optional system prompt followed by conversation messages
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        if !request.system.is_empty() {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": request.system.join("\n")
+            }));
+        }
+        for m in &request.messages {
+            messages.push(serde_json::json!({
+                "role": m.role,
+                "content": m.content
+            }));
+        }
+
+        let body = serde_json::json!({
+            "model": request.model,
+            "messages": messages,
+            "stream": false
+        });
+
+        let url = format!("{}/api/chat", self.base_url);
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama API error ({status}): {error_body}");
+        }
+
+        let json: serde_json::Value = response.json().await?;
+
+        let text = json["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        // Ollama returns token counts in eval_count / prompt_eval_count
+        let input_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = json["eval_count"].as_u64().unwrap_or(0) as u32;
+
         Ok(vec![
-            StreamChunk::TextDelta(format!(
-                "[ollama/{}] provider connected but streaming not yet wired",
-                request.model
-            )),
+            StreamChunk::TextDelta(text),
             StreamChunk::Usage {
-                input_tokens: 0,
-                output_tokens: 0,
+                input_tokens,
+                output_tokens,
             },
             StreamChunk::Done,
         ])
     }
 
     async fn validate_key(&self) -> anyhow::Result<bool> {
-        // Check if Ollama is running
+        // No auth — just check if Ollama is reachable
         let url = format!("{}/api/tags", self.base_url);
         let resp = reqwest::get(&url).await;
         Ok(resp.is_ok())

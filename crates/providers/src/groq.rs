@@ -2,7 +2,9 @@ use async_trait::async_trait;
 
 use crate::{MessageRequest, ModelInfo, Provider, StreamChunk};
 
-/// Groq provider — uses OpenAI-compatible API with Groq endpoint.
+const GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
+
+/// Groq provider — uses OpenAI-compatible API at the Groq endpoint.
 pub struct GroqProvider {
     api_key: String,
 }
@@ -47,23 +49,80 @@ impl Provider for GroqProvider {
         ]
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn send_message(&self, request: &MessageRequest) -> anyhow::Result<Vec<StreamChunk>> {
-        let _ = &self.api_key;
+        let client = reqwest::Client::new();
+
+        // Build messages: optional system prompt followed by conversation messages
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        if !request.system.is_empty() {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": request.system.join("\n")
+            }));
+        }
+        for m in &request.messages {
+            messages.push(serde_json::json!({
+                "role": m.role,
+                "content": m.content
+            }));
+        }
+
+        let body = serde_json::json!({
+            "model": request.model,
+            "messages": messages,
+            "max_tokens": request.max_tokens
+        });
+
+        let url = format!("{GROQ_BASE_URL}/chat/completions");
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Groq API error ({status}): {error_body}");
+        }
+
+        let json: serde_json::Value = response.json().await?;
+
+        let text = json["choices"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|c| c["message"]["content"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+
         Ok(vec![
-            StreamChunk::TextDelta(format!(
-                "[groq/{}] provider connected but streaming not yet wired",
-                request.model
-            )),
+            StreamChunk::TextDelta(text),
             StreamChunk::Usage {
-                input_tokens: 0,
-                output_tokens: 0,
+                input_tokens,
+                output_tokens,
             },
             StreamChunk::Done,
         ])
     }
 
     async fn validate_key(&self) -> anyhow::Result<bool> {
-        Ok(!self.api_key.is_empty())
+        if self.api_key.is_empty() {
+            return Ok(false);
+        }
+        let client = reqwest::Client::new();
+        let url = format!("{GROQ_BASE_URL}/models");
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await?;
+        Ok(resp.status() != reqwest::StatusCode::UNAUTHORIZED)
     }
 
     fn estimate_cost(&self, _model: &str, input_tokens: u32, output_tokens: u32) -> f64 {

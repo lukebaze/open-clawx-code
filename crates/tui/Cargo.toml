@@ -10,6 +10,7 @@ claw-api.workspace = true
 claw-runtime.workspace = true
 ocx-gitnexus = { path = "../gitnexus" }
 ocx-orchestrator = { path = "../orchestrator" }
+ocx-providers = { path = "../providers" }
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
