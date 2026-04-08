@@ -751,7 +751,7 @@ impl App {
 
     fn show_model_picker(&mut self) {
         // Build model list from known providers
-        let models = vec![
+        let mut models = vec![
             ModelEntry {
                 id: "claude-sonnet-4-20250514".to_string(),
                 name: "Claude Sonnet 4".to_string(),
@@ -809,6 +809,20 @@ impl App {
                 is_active: self.model_name == "llama-3.3-70b",
             },
         ];
+
+        // Append models from custom providers
+        for cp in &self.user_config.custom_providers {
+            for model_id in &cp.models {
+                models.push(ModelEntry {
+                    id: model_id.clone(),
+                    name: model_id.clone(),
+                    provider: cp.name.clone(),
+                    context_window: 0, // unknown for custom
+                    is_active: self.model_name == *model_id,
+                });
+            }
+        }
+
         self.model_picker = Some(ModelPickerState::new(models));
     }
 
