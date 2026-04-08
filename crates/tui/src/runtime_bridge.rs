@@ -4,7 +4,7 @@
 //! async provider methods from the sync `ApiClient` trait.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use claw_runtime::{
     estimate_session_tokens, pricing_for_model, ApiClient, ApiRequest, AssistantEvent,
@@ -26,7 +26,7 @@ struct TuiApiClient {
     event_tx: mpsc::Sender<Event>,
     model: String,
     registry: ProviderRegistry,
-    rt: tokio::runtime::Handle,
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
 impl ApiClient for TuiApiClient {
@@ -185,11 +185,15 @@ impl RuntimeBridge {
         model: String,
         workspace_root: PathBuf,
     ) {
-        // Create a tokio runtime for async provider calls
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create tokio runtime for providers");
+        // Create a tokio runtime for async provider calls (multi-thread so
+        // handle.block_on works from the bridge's sync loop)
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for providers"),
+        );
 
         // Initialize session
         let mut session_mgr = match SessionManager::new(&workspace_root) {
@@ -226,7 +230,7 @@ impl RuntimeBridge {
             event_tx: event_tx.clone(),
             model: model.clone(),
             registry,
-            rt: rt.handle().clone(),
+            rt: Arc::clone(&rt),
         };
         let tool_executor = TuiToolExecutor {
             event_tx: event_tx.clone(),
